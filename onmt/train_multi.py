@@ -26,7 +26,7 @@ def main(opt):
     # Train with multiprocessing.
     procs = []
     for i in range(nb_gpu):
-        opt.gpu_rank = i
+        opt.gpu_ranks = i
         opt.device_id = i
 
         procs.append(mp.Process(target=run, args=(
@@ -41,14 +41,14 @@ def main(opt):
 def run(opt, error_queue):
     """ run process """
     try:
-        opt.gpu_rank = onmt.utils.distributed.multi_init(opt)
+        opt.gpu_ranks = onmt.utils.distributed.multi_init(opt)
         single_main(opt)
     except KeyboardInterrupt:
         pass  # killed by parent, do nothing
     except Exception:
         # propagate exception to parent process, keeping original traceback
         import traceback
-        error_queue.put((opt.gpu_rank, traceback.format_exc()))
+        error_queue.put((opt.gpu_ranks, traceback.format_exc()))
 
 
 class ErrorHandler(object):

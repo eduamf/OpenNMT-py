@@ -1,6 +1,5 @@
 """ Translation main class """
-from __future__ import division, unicode_literals
-from __future__ import print_function
+from __future__ import unicode_literals, print_function
 
 import torch
 import onmt.inputters as inputters
@@ -45,7 +44,7 @@ class TranslationBuilder(object):
             for i in range(len(tokens)):
                 if tokens[i] == vocab.itos[inputters.UNK]:
                     _, max_index = attn[i].max(0)
-                    tokens[i] = src_raw[max_index[0]]
+                    tokens[i] = src_raw[max_index.item()]
         return tokens
 
     def from_batch(self, translation_batch):

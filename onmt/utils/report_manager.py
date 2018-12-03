@@ -11,8 +11,12 @@ from onmt.utils.logging import logger
 def build_report_manager(opt):
     if opt.tensorboard:
         from tensorboardX import SummaryWriter
-        writer = SummaryWriter(opt.tensorboard_log_dir
-                               + datetime.now().strftime("/%b-%d_%H-%M-%S"),
+        tensorboard_log_dir = opt.tensorboard_log_dir
+
+        if not opt.train_from:
+            tensorboard_log_dir += datetime.now().strftime("/%b-%d_%H-%M-%S")
+
+        writer = SummaryWriter(tensorboard_log_dir,
                                comment="Unmt")
     else:
         writer = None
@@ -65,14 +69,16 @@ class ReportMgrBase(object):
             raise ValueError("""ReportMgr needs to be started
                                 (set 'start_time' or use 'start()'""")
 
-        if multigpu:
-            report_stats = onmt.utils.Statistics.all_gather_stats(report_stats)
-
         if step % self.report_every == 0:
+            if multigpu:
+                report_stats = \
+                    onmt.utils.Statistics.all_gather_stats(report_stats)
             self._report_training(
                 step, num_steps, learning_rate, report_stats)
             self.progress_step += 1
-        return onmt.utils.Statistics()
+            return onmt.utils.Statistics()
+        else:
+            return report_stats
 
     def _report_training(self, *args, **kwargs):
         """ To be overridden """

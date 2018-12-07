@@ -197,7 +197,8 @@ def build_save_vocab(train_dataset, fields, opt):
                                    opt.src_words_min_frequency,
                                    opt.tgt_vocab,
                                    opt.tgt_vocab_size,
-                                   opt.tgt_words_min_frequency)
+                                   opt.tgt_words_min_frequency,
+                                   opt.only_letters_vocab)
 
     # Can't save fields, so remove/reconstruct at training time.
     vocab_file = opt.save_data + '.vocab.pt'

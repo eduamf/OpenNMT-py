@@ -277,7 +277,8 @@ def _build_field_vocab(field, counter, **kwargs):
 
 def build_vocab(train_dataset_files, fields, data_type, share_vocab,
                 src_vocab_path, src_vocab_size, src_words_min_frequency,
-                tgt_vocab_path, tgt_vocab_size, tgt_words_min_frequency):
+                tgt_vocab_path, tgt_vocab_size, tgt_words_min_frequency,
+                only_letters_vocab):
     """
     Args:
         train_dataset_files: a list of train dataset pt file.
@@ -292,6 +293,7 @@ def build_vocab(train_dataset_files, fields, data_type, share_vocab,
         tgt_vocab_size(int): size of the target vocabulary.
         tgt_words_min_frequency(int): the minimum frequency needed to
                 include a target word in the vocabulary.
+        only_letters_vocab(int): accept only words with letters.
 
     Returns:
         Dict of Fields
@@ -328,13 +330,24 @@ def build_vocab(train_dataset_files, fields, data_type, share_vocab,
         for ex in dataset.examples:
             for k in fields:
                 val = getattr(ex, k, None)
+                if only_letters_vocab == 1 and k in ('tgt','src'):
+                    wordsREGEX = '^[a-zäàáãëèéïìíöòóõüùúßçñ\'\-\´\`]+$'
+                    pesq = re.compile(wordsREGEX, re.IGNORECASE)
+                    lst_val = list(val)
+                    lst_new = list()
+                    for valor in lst_val:
+                        g = pesq.match(valor)
+                        if g:
+                            x = g.group()
+                            lst_new.append(x)
+                    if len(lst_new) > 0: val = tuple(lst_new)
                 if not fields[k].sequential:
                     continue
                 elif k == 'src' and src_vocab:
                     continue
                 elif k == 'tgt' and tgt_vocab:
                     continue
-                counter[k].update(val)
+                if len(val) > 0: counter[k].update(val)
 
         # Drop the none-using from memory but keep the last
         if (index < len(train_dataset_files) - 1):

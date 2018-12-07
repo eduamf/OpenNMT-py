@@ -20,7 +20,7 @@ from onmt.inputters.audio_dataset import AudioDataset
 from onmt.utils.logging import logger
 
 import gc
-
+import re
 
 def _getstate(self):
     return dict(self.__dict__, stoi=dict(self.stoi))

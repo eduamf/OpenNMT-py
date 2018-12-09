@@ -278,7 +278,7 @@ def _build_field_vocab(field, counter, **kwargs):
 def build_vocab(train_dataset_files, fields, data_type, share_vocab,
                 src_vocab_path, src_vocab_size, src_words_min_frequency,
                 tgt_vocab_path, tgt_vocab_size, tgt_words_min_frequency,
-                lower, only_letters_vocab):
+                lower, only_letters):
     """
     Args:
         train_dataset_files: a list of train dataset pt file.
@@ -293,7 +293,7 @@ def build_vocab(train_dataset_files, fields, data_type, share_vocab,
         tgt_vocab_size(int): size of the target vocabulary.
         tgt_words_min_frequency(int): the minimum frequency needed to
                 include a target word in the vocabulary.
-        only_letters_vocab(int): accept only words with letters.
+        only_letters(int): accept only words with letters.
 
     Returns:
         Dict of Fields
@@ -330,7 +330,7 @@ def build_vocab(train_dataset_files, fields, data_type, share_vocab,
         for ex in dataset.examples:
             for k in fields:
                 val = getattr(ex, k, None)
-                if only_letters_vocab == 1 and k in ('tgt','src'):
+                if only_letters == 1 and k in ('tgt','src'):
                     wordsREGEX = '^[a-zäàáãëèéïìíöòóõüùúßçñ\'\-\´\`]+$'
                     pesq = re.compile(wordsREGEX, re.IGNORECASE)
                     lst_val = list(val)

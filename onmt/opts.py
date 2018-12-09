@@ -224,7 +224,7 @@ def preprocess_opts(parser):
               help="Create dynamic dictionaries")
     group.add('--share_vocab', '-share_vocab', action='store_true',
               help="Share source and target vocabulary")
-    group.add('--only_letters_vocab', '-only_letters_vocab', type=int, default=0,
+    group.add('--only_letters', '-only_letters', type=int, default=0,
               help="Only accept words with letters")
 
     # Truncation options, for text corpus

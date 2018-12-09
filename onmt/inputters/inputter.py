@@ -278,7 +278,7 @@ def _build_field_vocab(field, counter, **kwargs):
 def build_vocab(train_dataset_files, fields, data_type, share_vocab,
                 src_vocab_path, src_vocab_size, src_words_min_frequency,
                 tgt_vocab_path, tgt_vocab_size, tgt_words_min_frequency,
-                only_letters_vocab):
+                lower, only_letters_vocab):
     """
     Args:
         train_dataset_files: a list of train dataset pt file.
@@ -339,6 +339,7 @@ def build_vocab(train_dataset_files, fields, data_type, share_vocab,
                         g = pesq.match(valor)
                         if g:
                             x = g.group()
+                            if lower: x.lower()
                             lst_new.append(x)
                     if len(lst_new) > 0: val = tuple(lst_new)
                 if not fields[k].sequential:

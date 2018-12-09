@@ -200,6 +200,7 @@ def build_save_vocab(train_dataset, fields, opt):
                                    opt.tgt_vocab,
                                    opt.tgt_vocab_size,
                                    opt.tgt_words_min_frequency,
+                                   opt.lower,
                                    opt.only_letters_vocab)
 
     # Can't save fields, so remove/reconstruct at training time.

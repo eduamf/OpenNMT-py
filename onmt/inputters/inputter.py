@@ -339,7 +339,7 @@ def build_vocab(train_dataset_files, fields, data_type, share_vocab,
                         g = pesq.match(valor)
                         if g:
                             x = g.group()
-                            if lower: x.lower()
+                            if lower: x = x.lower()
                             lst_new.append(x)
                     if len(lst_new) > 0: val = tuple(lst_new)
                 if not fields[k].sequential:

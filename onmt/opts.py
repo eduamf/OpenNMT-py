@@ -225,7 +225,7 @@ def preprocess_opts(parser):
     group.add('--share_vocab', '-share_vocab', action='store_true',
               help="Share source and target vocabulary")
     group.add('--only_letters', '-only_letters', type=int, default=0,
-              help="Only accept words with letters")
+              help="Include only words with letters and some special signs")
 
     # Truncation options, for text corpus
     group = parser.add_argument_group('Pruning')

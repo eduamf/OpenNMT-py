@@ -117,4 +117,4 @@ if __name__ == "__main__":
     opts.train_opts(parser)
 
     opt = parser.parse_args()
-    main(op
+    main(opt)

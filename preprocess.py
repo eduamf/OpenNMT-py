@@ -4,7 +4,7 @@
     Pre-process Data / features files and build vocabulary
 """
 
-import argparse
+import configargparse
 import glob
 import sys
 import gc
@@ -55,7 +55,6 @@ def build_save_in_shards_using_shards_size(src_corpus, tgt_corpus, fields,
     Divide src_corpus and tgt_corpus into smaller multiples
     src_copus and tgt corpus files, then build shards, each
     shard will have opt.shard_size samples except last shard.
-
     The reason we do this is to avoid taking up too much memory due
     to sucking in a huge corpus file.
     """
@@ -200,8 +199,7 @@ def build_save_vocab(train_dataset, fields, opt):
                                    opt.tgt_vocab,
                                    opt.tgt_vocab_size,
                                    opt.tgt_words_min_frequency,
-                                   opt.lower,
-                                   opt.only_letters_vocab)
+                                   opt.lower, only_letters)
 
     # Can't save fields, so remove/reconstruct at training time.
     vocab_file = opt.save_data + '.vocab.pt'

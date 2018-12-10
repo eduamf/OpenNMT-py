@@ -327,21 +327,24 @@ def build_vocab(train_dataset_files, fields, data_type, share_vocab,
     for index, path in enumerate(train_dataset_files):
         dataset = torch.load(path)
         logger.info(" * reloading %s." % path)
+        wordsREGEX = '^[a-zäàáãëèéïìíöòóõüùúßçñ\'\-\´\`]+$'
+        pesq = re.compile(wordsREGEX, re.IGNORECASE)
         for ex in dataset.examples:
             for k in fields:
                 val = getattr(ex, k, None)
-                if only_letters == 1 and k in ('tgt','src'):
-                    wordsREGEX = '^[a-zäàáãëèéïìíöòóõüùúßçñ\'\-\´\`]+$'
-                    pesq = re.compile(wordsREGEX, re.IGNORECASE)
-                    lst_val = list(val)
-                    lst_new = list()
-                    for valor in lst_val:
-                        g = pesq.match(valor)
-                        if g:
-                            x = g.group()
-                            if lower: x = x.lower()
-                            lst_new.append(x)
-                    if len(lst_new) > 0: val = tuple(lst_new)
+                if k in ('tgt','src'):
+                    if (only_letters == 1 or lower):
+                        lst_val = list(val)
+                        lst_new = list()
+                        for valor in lst_val:
+                            g = pesq.match(valor)     
+                            if g:
+                                x = g.group()
+                                if lower: x = x.lower()
+                                lst_new.append(x)
+                            elif only_letters != 1: 
+                                lst_new.append(valor)
+                        if len(lst_new) > 0: val = tuple(lst_new)
                 if not fields[k].sequential:
                     continue
                 elif k == 'src' and src_vocab:

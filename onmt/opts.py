@@ -224,8 +224,6 @@ def preprocess_opts(parser):
               help="Create dynamic dictionaries")
     group.add('--share_vocab', '-share_vocab', action='store_true',
               help="Share source and target vocabulary")
-    group.add('--only_letters', '-only_letters', type=int, default=0,
-              help="Include only words with letters and some special signs")
 
     # Truncation options, for text corpus
     group = parser.add_argument_group('Pruning')
@@ -240,6 +238,8 @@ def preprocess_opts(parser):
               type=int, default=0,
               help="Truncate target sequence length.")
     group.add('--lower', '-lower', action='store_true', help='lowercase data')
+    group.add('--filter_valid', '-filter_valid', action='store_true',
+              help='Filter validation data by src and/or tgt length')
 
     # Data processing options
     group = parser.add_argument_group('Random')
@@ -382,7 +382,7 @@ def train_opts(parser):
               help='Deprecated epochs see train_steps')
     group.add('--optim', '-optim', default='sgd',
               choices=['sgd', 'adagrad', 'adadelta', 'adam',
-                       'sparseadam'],
+                       'sparseadam', 'adafactor'],
               help="""Optimization method.""")
     group.add('--adagrad_accumulator_init', '-adagrad_accumulator_init',
               type=float, default=0,
@@ -432,8 +432,7 @@ def train_opts(parser):
     group.add('--learning_rate_decay', '-learning_rate_decay',
               type=float, default=0.5,
               help="""If update_learning_rate, decay learning rate by
-                       this much if (i) perplexity does not decrease on the
-                       validation set or (ii) steps have gone past
+                       this much if steps have gone past
                        start_decay_steps""")
     group.add('--start_decay_steps', '-start_decay_steps',
               type=int, default=50000,

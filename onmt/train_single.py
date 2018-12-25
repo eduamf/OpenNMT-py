@@ -12,7 +12,7 @@ import torch
 import onmt.opts as opts
 
 from onmt.inputters.inputter import build_dataset_iter, lazily_load_dataset, \
-    _load_fields, _collect_report_features
+    load_fields, _collect_report_features
 from onmt.model_builder import build_model
 from onmt.utils.optimizers import build_optim
 from onmt.trainer import build_trainer
@@ -34,7 +34,7 @@ def _tally_parameters(model):
     for name, param in model.named_parameters():
         if 'encoder' in name:
             enc += param.nelement()
-        elif ('decoder' or 'generator') in name:
+        else:
             dec += param.nelement()
     return n_params, enc, dec
 
@@ -51,14 +51,17 @@ def training_opt_postprocessing(opt, device_id):
     if opt.rnn_size != -1:
         opt.enc_rnn_size = opt.rnn_size
         opt.dec_rnn_size = opt.rnn_size
-        if opt.model_type == 'text' and opt.enc_rnn_size != opt.dec_rnn_size:
-            raise AssertionError("""We do not support different encoder and
-                                 decoder rnn sizes for translation now.""")
 
-    opt.brnn = (opt.encoder_type == "brnn")
+        # this check is here because audio allows the encoder and decoder to
+        # be different sizes, but other model types do not yet
+        same_size = opt.enc_rnn_size == opt.dec_rnn_size
+        assert opt.model_type == 'audio' or same_size, \
+            "The encoder and decoder rnns must be the same size for now"
 
-    if opt.rnn_type == "SRU" and not opt.gpu_ranks:
-        raise AssertionError("Using SRU requires -gpu_ranks set.")
+    opt.brnn = opt.encoder_type == "brnn"
+
+    assert opt.rnn_type != "SRU" or opt.gpu_ranks, \
+        "Using SRU requires -gpu_ranks set."
 
     if torch.cuda.is_available() and not opt.gpu_ranks:
         logger.info("WARNING: You have a CUDA device, \
@@ -110,7 +113,7 @@ def main(opt, device_id):
     data_type = first_dataset.data_type
 
     # Load fields generated from preprocess phase.
-    fields = _load_fields(first_dataset, data_type, opt, checkpoint)
+    fields = load_fields(first_dataset, opt, checkpoint)
 
     # Report src/tgt features.
 

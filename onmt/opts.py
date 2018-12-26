@@ -238,6 +238,8 @@ def preprocess_opts(parser):
               type=int, default=0,
               help="Truncate target sequence length.")
     group.add('--lower', '-lower', action='store_true', help='lowercase data')
+    group.add('--only_words', '-only_words',
+              type=int, default=0, help="1 = only words; 2 = words and puctuation marks.")
     group.add('--filter_valid', '-filter_valid', action='store_true',
               help='Filter validation data by src and/or tgt length')
 

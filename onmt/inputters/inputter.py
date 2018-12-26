@@ -330,7 +330,7 @@ def build_vocab(train_dataset_files, fields, data_type, share_vocab,
         dataset = torch.load(path)
         logger.info(" * reloading %s." % path)
         wordsREGEX = '^[a-zäàáãëèéïìíöòóõüùúßçñ\æ\œ\'\-\´\`\º\$\ª]+$'
-        sepREGEX = '^[\)\(\-\,\.\;\"\'\]\[\|\}\{\*\­\—\…\‘\’\“\”\?\¿\!\:\§\/\\]+$'
+        sepREGEX = '^[\)\(\-\,\.\;\"\'\]\[\|\}\{\*\—\…\‘\’\“\”\?\¿\!\:\§\/\\\\]+$'
         pesqW = re.compile(wordsREGEX, re.IGNORECASE)
         pesqS = re.compile(sepREGEX)
         for ex in dataset.examples:
@@ -346,7 +346,7 @@ def build_vocab(train_dataset_files, fields, data_type, share_vocab,
                             for valor in lst_val:
                                 w = pesqW.match(valor)
                                 s = pesqS.match(valor)
-                                if only_words > 1 and w:
+                                if only_words > 0 and w:
                                     x = w.group()
                                     if lower: x = x.lower()
                                     lst_new.append(x)
@@ -370,9 +370,9 @@ def build_vocab(train_dataset_files, fields, data_type, share_vocab,
             gc.collect()
 
     if tgt_vocab_size == 0:
-        tgt_vocab_size = len(counter["tgt"])
+        tgt_vocab_size = len(counters["tgt"])
     if src_vocab_size == 0:
-        src_vocab_size = len(counter["src"])
+        src_vocab_size = len(counters["src"])
 
     _build_field_vocab(
         fields["tgt"], counters["tgt"],

@@ -34,17 +34,6 @@ wheels/
 .installed.cfg
 *.egg
 
-# Logs
-logs/
-
-# Testes
-test/
-train/
-eduamf/
-data/
-models/
-embeddings/
-
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -105,6 +94,9 @@ celerybeat-schedule
 env/
 venv/
 ENV/
+
+# My changes
+eduamf/
 
 # Spyder project settings
 .spyderproject

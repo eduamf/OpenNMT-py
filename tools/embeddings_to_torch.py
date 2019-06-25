@@ -1,95 +1,82 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from __future__ import print_function
 from __future__ import division
 import six
-import sys
-import numpy as np
 import argparse
 import torch
 from onmt.utils.logging import init_logger, logger
+from onmt.inputters.inputter import _old_style_vocab
 
 
-def get_vocabs(dict_file):
-    vocabs = torch.load(dict_file)
+def get_vocabs(dict_path):
+    fields = torch.load(dict_path)
 
-    enc_vocab, dec_vocab = None, None
+    vocs = []
+    for side in ['src', 'tgt']:
+        if _old_style_vocab(fields):
+            vocab = next((v for n, v in fields if n == side), None)
+        else:
+            try:
+                vocab = fields[side].base_field.vocab
+            except AttributeError:
+                vocab = fields[side].vocab
+        vocs.append(vocab)
+    enc_vocab, dec_vocab = vocs
 
-    # the vocab object is a list of tuple (name, torchtext.Vocab)
-    # we iterate over this list and associate vocabularies based on the name
-    for vocab in vocabs:
-        if vocab[0] == 'src':
-            enc_vocab = vocab[1]
-        if vocab[0] == 'tgt':
-            dec_vocab = vocab[1]
-    assert enc_vocab is not None and dec_vocab is not None
-
-    logger.info("From: %s" % dict_file)
+    logger.info("From: %s" % dict_path)
     logger.info("\t* source vocab: %d words" % len(enc_vocab))
     logger.info("\t* target vocab: %d words" % len(dec_vocab))
 
     return enc_vocab, dec_vocab
 
 
-def get_embeddings(file_enc, opt, flag):
+def read_embeddings(file_enc, skip_lines=0, filter_set=None):
     embs = dict()
-    if flag == 'enc':
-        for (i, l) in enumerate(open(file_enc, 'rb')):
-            if i < opt.skip_lines:
+    total_vectors_in_file = 0
+    with open(file_enc, 'rb') as f:
+        for i, line in enumerate(f):
+            if i < skip_lines:
                 continue
-            if not l:
+            if not line:
                 break
-            if len(l) == 0:
+            if len(line) == 0:
+                # is this reachable?
                 continue
 
-            l_split = l.decode('utf8').strip().split(' ')
+            l_split = line.decode('utf8').strip().split(' ')
             if len(l_split) == 2:
                 continue
-            embs[l_split[0]] = [float(em) for em in l_split[1:]]
-        logger.info("Got {} encryption embeddings from {}".format(len(embs),
-                                                                  file_enc))
-    else:
-
-        for (i, l) in enumerate(open(file_enc, 'rb')):
-            if not l:
-                break
-            if len(l) == 0:
-                continue
-
-            l_split = l.decode('utf8').strip().split(' ')
-            if len(l_split) == 2:
+            total_vectors_in_file += 1
+            if filter_set is not None and l_split[0] not in filter_set:
                 continue
             embs[l_split[0]] = [float(em) for em in l_split[1:]]
-        logger.info("Got {} decryption embeddings from {}".format(len(embs),
-                                                                  file_enc))
-    return embs
+    return embs, total_vectors_in_file
 
 
-def match_embeddings(vocab, emb, opt):
-    dim = len(six.next(six.itervalues(emb)))
-    filtered_embeddings = np.zeros((len(vocab), dim))
-    count = {"match": 0, "miss": 0}
-    for w, w_id in vocab.stoi.items():
-        if w in emb:
-            filtered_embeddings[w_id] = emb[w]
-            count['match'] += 1
-        else:
-            if opt.verbose:
-                logger.info(u"not found:\t{}".format(w), file=sys.stderr)
-            count['miss'] += 1
-
-    return torch.Tensor(filtered_embeddings), count
+def convert_to_torch_tensor(word_to_float_list_dict, vocab):
+    dim = len(six.next(six.itervalues(word_to_float_list_dict)))
+    tensor = torch.zeros((len(vocab), dim))
+    for word, values in word_to_float_list_dict.items():
+        tensor[vocab.stoi[word]] = torch.Tensor(values)
+    return tensor
 
 
-TYPES = ["GloVe", "word2vec"]
+def calc_vocab_load_stats(vocab, loaded_embed_dict):
+    matching_count = len(
+        set(vocab.stoi.keys()) & set(loaded_embed_dict.keys()))
+    missing_count = len(vocab) - matching_count
+    percent_matching = matching_count / len(vocab) * 100
+    return matching_count, missing_count, percent_matching
 
 
 def main():
-
     parser = argparse.ArgumentParser(description='embeddings_to_torch.py')
-    parser.add_argument('-emb_file_enc', required=True,
+    parser.add_argument('-emb_file_both', required=False,
+                        help="loads Embeddings for both source and target "
+                             "from this file.")
+    parser.add_argument('-emb_file_enc', required=False,
                         help="source Embeddings from this file")
-    parser.add_argument('-emb_file_dec', required=True,
+    parser.add_argument('-emb_file_dec', required=False,
                         help="target Embeddings from this file")
     parser.add_argument('-output_file', required=True,
                         help="Output file for the prepared data")
@@ -98,44 +85,73 @@ def main():
     parser.add_argument('-verbose', action="store_true", default=False)
     parser.add_argument('-skip_lines', type=int, default=0,
                         help="Skip first lines of the embedding file")
-    parser.add_argument('-type', choices=TYPES, default="GloVe")
+    parser.add_argument('-type', choices=["GloVe", "word2vec"],
+                        default="GloVe")
     opt = parser.parse_args()
 
     enc_vocab, dec_vocab = get_vocabs(opt.dict_file)
-    if opt.type == "word2vec":
-        opt.skip_lines = 1
 
-    embeddings_enc = get_embeddings(opt.emb_file_enc, opt, flag='enc')
-    embeddings_dec = get_embeddings(opt.emb_file_dec, opt, flag='dec')
-
-    filtered_enc_embeddings, enc_count = match_embeddings(enc_vocab,
-                                                          embeddings_enc,
-                                                          opt)
-    filtered_dec_embeddings, dec_count = match_embeddings(dec_vocab,
-                                                          embeddings_dec,
-                                                          opt)
-    logger.info("\nMatching: ")
-    match_percent = [_['match'] / (_['match'] + _['miss']) * 100
-                     for _ in [enc_count, dec_count]]
+    # Read in embeddings
+    skip_lines = 1 if opt.type == "word2vec" else opt.skip_lines
+    if opt.emb_file_both is not None:
+        if opt.emb_file_enc is not None:
+            raise ValueError("If --emb_file_both is passed in, you should not"
+                             "set --emb_file_enc.")
+        if opt.emb_file_dec is not None:
+            raise ValueError("If --emb_file_both is passed in, you should not"
+                             "set --emb_file_dec.")
+        set_of_src_and_tgt_vocab = \
+            set(enc_vocab.stoi.keys()) | set(dec_vocab.stoi.keys())
+        logger.info("Reading encoder and decoder embeddings from {}".format(
+            opt.emb_file_both))
+        src_vectors, total_vec_count = \
+            read_embeddings(opt.emb_file_both, skip_lines,
+                            set_of_src_and_tgt_vocab)
+        tgt_vectors = src_vectors
+        logger.info("\tFound {} total vectors in file".format(total_vec_count))
+    else:
+        if opt.emb_file_enc is None:
+            raise ValueError("If --emb_file_enc not provided. Please specify "
+                             "the file with encoder embeddings, or pass in "
+                             "--emb_file_both")
+        if opt.emb_file_dec is None:
+            raise ValueError("If --emb_file_dec not provided. Please specify "
+                             "the file with encoder embeddings, or pass in "
+                             "--emb_file_both")
+        logger.info("Reading encoder embeddings from {}".format(
+            opt.emb_file_enc))
+        src_vectors, total_vec_count = read_embeddings(
+            opt.emb_file_enc, skip_lines,
+            filter_set=enc_vocab.stoi
+        )
+        logger.info("\tFound {} total vectors in file.".format(
+            total_vec_count))
+        logger.info("Reading decoder embeddings from {}".format(
+            opt.emb_file_dec))
+        tgt_vectors, total_vec_count = read_embeddings(
+            opt.emb_file_dec, skip_lines,
+            filter_set=dec_vocab.stoi
+        )
+        logger.info("\tFound {} total vectors in file".format(total_vec_count))
+    logger.info("After filtering to vectors in vocab:")
     logger.info("\t* enc: %d match, %d missing, (%.2f%%)"
-                % (enc_count['match'],
-                   enc_count['miss'],
-                   match_percent[0]))
+                % calc_vocab_load_stats(enc_vocab, src_vectors))
     logger.info("\t* dec: %d match, %d missing, (%.2f%%)"
-                % (dec_count['match'],
-                   dec_count['miss'],
-                   match_percent[1]))
+                % calc_vocab_load_stats(dec_vocab, src_vectors))
 
-    logger.info("\nFiltered embeddings:")
-    logger.info("\t* enc: %s" % str(filtered_enc_embeddings.size()))
-    logger.info("\t* dec: %s" % str(filtered_dec_embeddings.size()))
-
+    # Write to file
     enc_output_file = opt.output_file + ".enc.pt"
     dec_output_file = opt.output_file + ".dec.pt"
     logger.info("\nSaving embedding as:\n\t* enc: %s\n\t* dec: %s"
                 % (enc_output_file, dec_output_file))
-    torch.save(filtered_enc_embeddings, enc_output_file)
-    torch.save(filtered_dec_embeddings, dec_output_file)
+    torch.save(
+        convert_to_torch_tensor(src_vectors, enc_vocab),
+        enc_output_file
+    )
+    torch.save(
+        convert_to_torch_tensor(tgt_vectors, dec_vocab),
+        dec_output_file
+    )
     logger.info("\nDone.")
 
 

@@ -2,26 +2,41 @@
 import glob
 import os
 import codecs
+import math
 
-from collections import Counter, defaultdict, OrderedDict
-from itertools import count
-from functools import partial
+from collections import Counter, defaultdict
+from itertools import chain, cycle
 
 import torch
 import torchtext.data
 from torchtext.data import Field
 from torchtext.vocab import Vocab
 
-from onmt.inputters.dataset_base import PAD_WORD, BOS_WORD, EOS_WORD
-from onmt.inputters.text_dataset import TextDataset
-from onmt.inputters.image_dataset import ImageDataset
-from onmt.inputters.audio_dataset import AudioDataset
+from onmt.inputters.text_dataset import text_fields, TextMultiField
+from onmt.inputters.image_dataset import image_fields
+from onmt.inputters.audio_dataset import audio_fields
 from onmt.utils.logging import logger
+# backwards compatibility
+from onmt.inputters.text_dataset import _feature_tokenize  # noqa: F401
+from onmt.inputters.image_dataset import (  # noqa: F401
+    batch_img as make_img)
 
 import gc
 import re
 
+# Set regex patterns 
+# "｟"   U+FF5F
+# "｠"   U+FF60
+# "："   U+FF1A
+# "￭"   U+FFED
+wrdREGEX = r'^[\uFFED\'a-zâôêäàáãëèéïìíöòóõüùúßçñ\æ\œ\'\-\´\`\º\$\ª]+$'
+sepREGEX = r'^[\)\(\-\,\.\;\"\'\]\[\|\}\{\*\—\…\‘\’\“\”\?\¿\!\:\§\/\\\\]+$'
+prtREGEX = r'^([\uFFED]?[\uFF5F\uFF1A\uFF60])(.*[\uFF1A])?(.*)([\uFF60][\uFFED]?)$'
+pesqWrd = re.compile(wrdREGEX, re.IGNORECASE)
+pesqSep = re.compile(sepREGEX)
+pesqPrt = re.compile(prtREGEX)
 
+# monkey-patch to make torchtext Vocab's pickleable
 def _getstate(self):
     return dict(self.__dict__, stoi=dict(self.stoi))
 
@@ -53,312 +68,395 @@ def make_tgt(data, vocab):
     return alignment
 
 
-def make_img(data, vocab):
-    c = data[0].size(0)
-    h = max([t.size(1) for t in data])
-    w = max([t.size(2) for t in data])
-    imgs = torch.zeros(len(data), c, h, w).fill_(1)
-    for i, img in enumerate(data):
-        imgs[i, :, 0:img.size(1), 0:img.size(2)] = img
-    return imgs
-
-
-def make_audio(data, vocab):
-    """ batch audio data """
-    nfft = data[0].size(0)
-    t = max([t.size(1) for t in data])
-    sounds = torch.zeros(len(data), 1, nfft, t)
-    for i, spect in enumerate(data):
-        sounds[i, :, :, 0:spect.size(1)] = spect
-    return sounds
-
-
-def get_fields(src_data_type, n_src_features, n_tgt_features):
+def get_fields(
+    src_data_type,
+    n_src_feats,
+    n_tgt_feats,
+    pad='<blank>',
+    bos='<s>',
+    eos='</s>',
+    dynamic_dict=False,
+    src_truncate=None,
+    tgt_truncate=None
+):
     """
     Args:
         src_data_type: type of the source input. Options are [text|img|audio].
-        n_src_features: the number of source features to
-            create `torchtext.data.Field` for.
-        n_tgt_features: the number of target features to
-            create `torchtext.data.Field` for.
+        n_src_feats (int): the number of source features (not counting tokens)
+            to create a :class:`torchtext.data.Field` for. (If
+            ``src_data_type=="text"``, these fields are stored together
+            as a ``TextMultiField``).
+        n_tgt_feats (int): See above.
+        pad (str): Special pad symbol. Used on src and tgt side.
+        bos (str): Special beginning of sequence symbol. Only relevant
+            for tgt.
+        eos (str): Special end of sequence symbol. Only relevant
+            for tgt.
+        dynamic_dict (bool): Whether or not to include source map and
+            alignment fields.
+        src_truncate: Cut off src sequences beyond this (passed to
+            ``src_data_type``'s data reader - see there for more details).
+        tgt_truncate: Cut off tgt sequences beyond this (passed to
+            :class:`TextDataReader` - see there for more details).
+
     Returns:
-        A dictionary whose keys are strings and whose values are the
-        corresponding Field objects.
+        A dict mapping names to fields. These names need to match
+        the dataset example attributes.
     """
+
     assert src_data_type in ['text', 'img', 'audio'], \
         "Data type not implemented"
-    fields = dict()
+    assert not dynamic_dict or src_data_type == 'text', \
+        'it is not possible to use dynamic_dict with non-text input'
+    fields = {}
 
-    if src_data_type == 'text':
-        fields["src"] = Field(pad_token=PAD_WORD, include_lengths=True)
-        for i in range(n_src_features):
-            fields["src_feat_" + str(i)] = Field(pad_token=PAD_WORD)
-    elif src_data_type == 'img':
-        fields["src"] = Field(
-            use_vocab=False, dtype=torch.float,
-            postprocessing=make_img, sequential=False)
-    else:
-        fields["src"] = Field(
-            use_vocab=False, dtype=torch.float,
-            postprocessing=make_audio, sequential=False)
+    fields_getters = {"text": text_fields,
+                      "img": image_fields,
+                      "audio": audio_fields}
 
-    if src_data_type == 'audio':
-        # only audio has src_lengths
-        fields["src_lengths"] = Field(
-            use_vocab=False, dtype=torch.long, sequential=False)
-    else:
-        # everything except audio has src_map and alignment
-        fields["src_map"] = Field(
+    src_field_kwargs = {"n_feats": n_src_feats,
+                        "include_lengths": True,
+                        "pad": pad, "bos": None, "eos": None,
+                        "truncate": src_truncate,
+                        "base_name": "src"}
+    fields["src"] = fields_getters[src_data_type](**src_field_kwargs)
+
+    tgt_field_kwargs = {"n_feats": n_tgt_feats,
+                        "include_lengths": False,
+                        "pad": pad, "bos": bos, "eos": eos,
+                        "truncate": tgt_truncate,
+                        "base_name": "tgt"}
+    fields["tgt"] = fields_getters["text"](**tgt_field_kwargs)
+
+    indices = Field(use_vocab=False, dtype=torch.long, sequential=False)
+    fields["indices"] = indices
+
+    if dynamic_dict:
+        src_map = Field(
             use_vocab=False, dtype=torch.float,
             postprocessing=make_src, sequential=False)
+        fields["src_map"] = src_map
 
-        fields["alignment"] = Field(
+        align = Field(
             use_vocab=False, dtype=torch.long,
             postprocessing=make_tgt, sequential=False)
-
-    # below this: things defined no matter what the data source type is
-    fields["tgt"] = Field(
-        init_token=BOS_WORD, eos_token=EOS_WORD, pad_token=PAD_WORD)
-
-    for i in range(n_tgt_features):
-        fields["tgt_feat_" + str(i)] = Field(
-            init_token=BOS_WORD, eos_token=EOS_WORD, pad_token=PAD_WORD)
-
-    fields["indices"] = Field(
-        use_vocab=False, dtype=torch.long, sequential=False)
+        fields["alignment"] = align
 
     return fields
 
 
-def load_fields_from_vocab(vocab, data_type="text"):
-    """
-    vocab: a list of (field name, torchtext.vocab.Vocab) pairs
-    data_type: text, img, or audio
-    returns: a dictionary whose keys are the field names and whose values
-             are field objects with the vocab set to the corresponding vocab
-             object from the input.
-    """
-    vocab = dict(vocab)
-    n_src_features = len(collect_features(vocab, 'src'))
-    n_tgt_features = len(collect_features(vocab, 'tgt'))
-    fields = get_fields(data_type, n_src_features, n_tgt_features)
-    for k, v in vocab.items():
-        fields[k].vocab = v
-    return fields
+def load_old_vocab(vocab, data_type="text", dynamic_dict=False):
+    """Update a legacy vocab/field format.
 
-
-def save_fields_to_vocab(fields):
-    """
-    fields: a dictionary whose keys are field names and whose values are
-            Field objects
-    returns: a list of (field name, vocab) pairs for the fields that have a
-             vocabulary
-    """
-    return [(k, f.vocab) for k, f in fields.items()
-            if f is not None and 'vocab' in f.__dict__]
-
-
-def make_features(batch, side, data_type='text'):
-    """
     Args:
-        batch (Tensor): a batch of source or target data.
-        side (str): for source or for target.
-        data_type (str): type of the source input.
-            Options are [text|img|audio].
+        vocab: a list of (field name, torchtext.vocab.Vocab) pairs. This is the
+            format formerly saved in *.vocab.pt files. Or, text data
+            not using a :class:`TextMultiField`.
+        data_type (str): text, img, or audio
+        dynamic_dict (bool): Used for copy attention.
+
     Returns:
-        A sequence of src/tgt tensors with optional feature tensors
-        of size (len x batch).
+        a dictionary whose keys are the field names and whose values Fields.
     """
-    assert side in ['src', 'tgt']
-    if isinstance(batch.__dict__[side], tuple):
-        data = batch.__dict__[side][0]
-    else:
-        data = batch.__dict__[side]
 
-    feat_start = side + "_feat_"
-    keys = sorted([k for k in batch.__dict__ if feat_start in k])
-    features = [batch.__dict__[k] for k in keys]
-    levels = [data] + features
+    if _old_style_vocab(vocab):
+        # List[Tuple[str, Vocab]] -> List[Tuple[str, Field]]
+        # -> dict[str, Field]
+        vocab = dict(vocab)
+        n_src_features = sum('src_feat_' in k for k in vocab)
+        n_tgt_features = sum('tgt_feat_' in k for k in vocab)
+        fields = get_fields(
+            data_type, n_src_features, n_tgt_features,
+            dynamic_dict=dynamic_dict)
+        for n, f in fields.items():
+            try:
+                f_iter = iter(f)
+            except TypeError:
+                f_iter = [(n, f)]
+            for sub_n, sub_f in f_iter:
+                if sub_n in vocab:
+                    sub_f.vocab = vocab[sub_n]
+        return fields
 
-    if data_type == 'text':
-        return torch.cat([level.unsqueeze(2) for level in levels], 2)
-    else:
-        return levels[0]
+    if _old_style_field_list(vocab):  # upgrade to multifield
+        # Dict[str, List[Tuple[str, Field]]]
+        # doesn't change structure - don't return early.
+        fields = vocab
+        for base_name, vals in fields.items():
+            if ((base_name == 'src' and data_type == 'text') or
+                    base_name == 'tgt'):
+                assert not isinstance(vals[0][1], TextMultiField)
+                fields[base_name] = [(base_name, TextMultiField(
+                    vals[0][0], vals[0][1], vals[1:]))]
+
+    if _old_style_nesting(vocab):
+        # Dict[str, List[Tuple[str, Field]]] -> List[Tuple[str, Field]]
+        # -> dict[str, Field]
+        fields = dict(list(chain.from_iterable(vocab.values())))
+
+    return fields
 
 
-def collect_features(fields, side="src"):
-    assert side in ["src", "tgt"]
-    feats = []
-    for j in count():
-        key = side + "_feat_" + str(j)
-        if key not in fields:
-            break
-        feats.append(key)
-    return feats
+def _old_style_vocab(vocab):
+    """Detect old-style vocabs (``List[Tuple[str, torchtext.data.Vocab]]``).
+
+    Args:
+        vocab: some object loaded from a *.vocab.pt file
+
+    Returns:
+        Whether ``vocab`` is a list of pairs where the second object
+        is a :class:`torchtext.vocab.Vocab` object.
+
+    This exists because previously only the vocab objects from the fields
+    were saved directly, not the fields themselves, and the fields needed to
+    be reconstructed at training and translation time.
+    """
+
+    return isinstance(vocab, list) and \
+        any(isinstance(v[1], Vocab) for v in vocab)
+
+
+def _old_style_nesting(vocab):
+    """Detect old-style nesting (``dict[str, List[Tuple[str, Field]]]``)."""
+    return isinstance(vocab, dict) and \
+        any(isinstance(v, list) for v in vocab.values())
+
+
+def _old_style_field_list(vocab):
+    """Detect old-style text fields.
+
+    Not old style vocab, old nesting, and text-type fields not using
+    ``TextMultiField``.
+
+    Args:
+        vocab: some object loaded from a *.vocab.pt file
+
+    Returns:
+        Whether ``vocab`` is not an :func:`_old_style_vocab` and not
+        a :class:`TextMultiField` (using an old-style text representation).
+    """
+
+    # if tgt isn't using TextMultiField, then no text field is.
+    return (not _old_style_vocab(vocab)) and _old_style_nesting(vocab) and \
+        (not isinstance(vocab['tgt'][0][1], TextMultiField))
+
+
+def old_style_vocab(vocab):
+    """The vocab/fields need updated."""
+    return _old_style_vocab(vocab) or _old_style_field_list(vocab) or \
+        _old_style_nesting(vocab)
 
 
 def filter_example(ex, use_src_len=True, use_tgt_len=True,
                    min_src_len=1, max_src_len=float('inf'),
                    min_tgt_len=1, max_tgt_len=float('inf')):
+    """Return whether an example is an acceptable length.
+
+    If used with a dataset as ``filter_pred``, use :func:`partial()`
+    for all keyword arguments.
+
+    Args:
+        ex (torchtext.data.Example): An object with a ``src`` and ``tgt``
+            property.
+        use_src_len (bool): Filter based on the length of ``ex.src``.
+        use_tgt_len (bool): Similar to above.
+        min_src_len (int): A non-negative minimally acceptable length
+            (examples of exactly this length will be included).
+        min_tgt_len (int): Similar to above.
+        max_src_len (int or float): A non-negative (possibly infinite)
+            maximally acceptable length (examples of exactly this length
+            will be included).
+        max_tgt_len (int or float): Similar to above.
     """
-    A generalized function for filtering examples based on the length of their
-    src or tgt values. Rather than being used by itself as the filter_pred
-    argument to a dataset, it should be partially evaluated with everything
-    specified except the value of the example.
-    """
-    return (not use_src_len or min_src_len <= len(ex.src) <= max_src_len) and \
-        (not use_tgt_len or min_tgt_len <= len(ex.tgt) <= max_tgt_len)
+
+    src_len = len(ex.src[0])
+    tgt_len = len(ex.tgt[0])
+    return (not use_src_len or min_src_len <= src_len <= max_src_len) and \
+        (not use_tgt_len or min_tgt_len <= tgt_len <= max_tgt_len)
 
 
-def build_dataset(fields, data_type, src,
-                  src_dir=None, tgt=None,
-                  src_seq_len=50, tgt_seq_len=50,
-                  src_seq_length_trunc=0, tgt_seq_length_trunc=0,
-                  dynamic_dict=False, sample_rate=0,
-                  window_size=0, window_stride=0, window=None,
-                  normalize_audio=True, use_filter_pred=True,
-                  image_channel_size=3):
-    """
-    src: path to corpus file or iterator over source data
-    tgt: path to corpus file, iterator over target data, or None
-    """
-    dataset_classes = {
-        'text': TextDataset, 'img': ImageDataset, 'audio': AudioDataset
-    }
-    assert data_type in dataset_classes
-    assert src is not None
-    assert not dynamic_dict or data_type == 'text', \
-        'it is not possible to use dynamic_dict with non-text input'
-    if data_type == 'text':
-        src_examples_iter = TextDataset.make_examples(
-            src, src_seq_length_trunc, "src"
-        )
-    elif data_type == 'img':
-        # there is a truncate argument as well, but it was never set to
-        # anything besides None before
-        src_examples_iter = ImageDataset.make_examples(
-            src, src_dir, 'src', channel_size=image_channel_size
-        )
-    else:
-        src_examples_iter = AudioDataset.make_examples(
-            src, src_dir, "src", sample_rate,
-            window_size, window_stride, window,
-            normalize_audio, None)
-
-    if tgt is None:
-        tgt_examples_iter = None
-    else:
-        tgt_examples_iter = TextDataset.make_examples(
-            tgt, tgt_seq_length_trunc, "tgt")
-
-    # the second conjunct means nothing will be filtered at translation time
-    # if there is no target data
-    if use_filter_pred and tgt_examples_iter is not None:
-        filter_pred = partial(
-            filter_example, use_src_len=data_type == 'text',
-            max_src_len=src_seq_len, max_tgt_len=tgt_seq_len
-        )
-    else:
-        filter_pred = None
-
-    dataset_cls = dataset_classes[data_type]
-    dataset = dataset_cls(
-        fields, src_examples_iter, tgt_examples_iter,
-        dynamic_dict=dynamic_dict, filter_pred=filter_pred)
-    return dataset
+def _pad_vocab_to_multiple(vocab, multiple):
+    vocab_size = len(vocab)
+    if vocab_size % multiple == 0:
+        return
+    target_size = int(math.ceil(vocab_size / multiple)) * multiple
+    padding_tokens = [
+        "averyunlikelytoken%d" % i for i in range(target_size - vocab_size)]
+    vocab.extend(Vocab(Counter(), specials=padding_tokens))
+    return vocab
 
 
-def _build_field_vocab(field, counter, **kwargs):
-    specials = list(OrderedDict.fromkeys(
-        tok for tok in [field.unk_token, field.pad_token, field.init_token,
-                        field.eos_token]
-        if tok is not None))
+def _build_field_vocab(field, counter, size_multiple=1, **kwargs):
+    # this is basically copy-pasted from torchtext.
+    all_specials = [
+        field.unk_token, field.pad_token, field.init_token, field.eos_token
+    ]
+    specials = [tok for tok in all_specials if tok is not None]
     field.vocab = field.vocab_cls(counter, specials=specials, **kwargs)
+    if size_multiple > 1:
+        _pad_vocab_to_multiple(field.vocab, size_multiple)
+
+
+def _load_vocab(vocab_path, name, counters, min_freq):
+    # counters changes in place
+    vocab = _read_vocab_file(vocab_path, name)
+    vocab_size = len(vocab)
+    logger.info('Loaded %s vocab has %d tokens.' % (name, vocab_size))
+    for i, token in enumerate(vocab):
+        # keep the order of tokens specified in the vocab file by
+        # adding them to the counter with decreasing counting values
+        counters[name][token] = vocab_size - i + min_freq
+    return vocab, vocab_size
+
+
+def _build_fv_from_multifield(multifield, counters, build_fv_args,
+                              size_multiple=1):
+    for name, field in multifield:
+        _build_field_vocab(
+            field,
+            counters[name],
+            size_multiple=size_multiple,
+            **build_fv_args[name])
+        logger.info(" * %s vocab size: %d." % (name, len(field.vocab)))
 
 
 def build_vocab(train_dataset_files, fields, data_type, share_vocab,
                 src_vocab_path, src_vocab_size, src_words_min_frequency,
                 tgt_vocab_path, tgt_vocab_size, tgt_words_min_frequency,
-                lower, only_words):
-    """
+                lower, only_words, save_vocab_path,
+                vocab_size_multiple=1
+                ):
+    """Build the fields for all data sides.
+
     Args:
         train_dataset_files: a list of train dataset pt file.
-        fields (dict): fields to build vocab for.
-        data_type: "text", "img" or "audio"?
-        share_vocab(bool): share source and target vocabulary?
-        src_vocab_path(string): Path to src vocabulary file.
-        src_vocab_size(int): size of the source vocabulary.
-        src_words_min_frequency(int): the minimum frequency needed to
-                include a source word in the vocabulary.
-        tgt_vocab_path(string): Path to tgt vocabulary file.
-        tgt_vocab_size(int): size of the target vocabulary.
-        tgt_words_min_frequency(int): the minimum frequency needed to
-                include a target word in the vocabulary.
+        fields (dict[str, Field]): fields to build vocab for.
+        data_type (str): A supported data type string.
+        share_vocab (bool): share source and target vocabulary?
+        src_vocab_path (str): Path to src vocabulary file.
+        src_vocab_size (int): size of the source vocabulary.
+        src_words_min_frequency (int): the minimum frequency needed to
+            include a source word in the vocabulary.
+        tgt_vocab_path (str): Path to tgt vocabulary file.
+        tgt_vocab_size (int): size of the target vocabulary.
+        tgt_words_min_frequency (int): the minimum frequency needed to
+            include a target word in the vocabulary.
+        vocab_size_multiple (int): ensure that the vocabulary size is a
+            multiple of this value.
         lower(bool): lower case vocab.
         only_words(int): 1 = accept only words with letters,
-                2 - accept words and punctuation marks.
+                    2 - accept words and punctuation marks.
+        save_vocab_path (string): use the path to save the vocabulary as text
+
     Returns:
         Dict of Fields
     """
-    # Prop src from field to get lower memory using when training with image
-    if data_type == 'img' or data_type == 'audio':
-        fields.pop("src")
-    counters = {k: Counter() for k in fields}
+
+    counters = defaultdict(Counter)
+
+    if src_vocab_path:
+        try:
+            logger.info("Using existing vocabulary...")
+            vocab = torch.load(src_vocab_path)
+            # return vocab to dump with standard name
+            return vocab
+        except torch.serialization.pickle.UnpicklingError:
+            logger.info("Building vocab from text file...")
+            # empty train_dataset_files so that vocab is only loaded from
+            # given paths in src_vocab_path, tgt_vocab_path
+            train_dataset_files = []
 
     # Load vocabulary
     if src_vocab_path:
-        src_vocab = load_vocabulary(src_vocab_path, "src")
-        src_vocab_size = len(src_vocab)
-        logger.info('Loaded source vocab has %d tokens.' % src_vocab_size)
-        for i, token in enumerate(src_vocab):
-            # keep the order of tokens specified in the vocab file by
-            # adding them to the counter with decreasing counting values
-            counters['src'][token] = src_vocab_size - i
+        src_vocab, src_vocab_size = _load_vocab(
+            src_vocab_path, "src", counters,
+            src_words_min_frequency)
     else:
         src_vocab = None
 
     if tgt_vocab_path:
-        tgt_vocab = load_vocabulary(tgt_vocab_path, "tgt")
-        tgt_vocab_size = len(tgt_vocab)
-        logger.info('Loaded source vocab has %d tokens.' % tgt_vocab_size)
-        for i, token in enumerate(tgt_vocab):
-            counters['tgt'][token] = tgt_vocab_size - i
+        tgt_vocab, tgt_vocab_size = _load_vocab(
+            tgt_vocab_path, "tgt", counters,
+            tgt_words_min_frequency)
     else:
         tgt_vocab = None
 
     for i, path in enumerate(train_dataset_files):
         dataset = torch.load(path)
         logger.info(" * reloading %s." % path)
-        wordsREGEX = '^[a-zäàáãëèéïìíöòóõüùúßçñ\æ\œ\'\-\´\`\º\$\ª]+$'
-        sepREGEX = '^[\)\(\-\,\.\;\"\'\]\[\|\}\{\*\—\…\‘\’\“\”\?\¿\!\:\§\/\\\\]+$'
-        pesqW = re.compile(wordsREGEX, re.IGNORECASE)
-        pesqS = re.compile(sepREGEX)
         for ex in dataset.examples:
-            for k in fields:
-                has_vocab = (k == 'src' and src_vocab) or \
-                    (k == 'tgt' and tgt_vocab)
-                if fields[k].sequential and not has_vocab:
-                    val = getattr(ex, k, None)
-                    if k in ('tgt','src'):
-                        if (only_words > 0 or lower):
-                            lst_val = list(val)
-                            lst_new = list()
+            for name, field in fields.items():
+                try:
+                    f_iter = iter(field)
+                except TypeError:
+                    f_iter = [(name, field)]
+                    all_data = [getattr(ex, name, None)]
+                else:
+                    all_data = getattr(ex, name)
+                lst_sav_src = list()
+                lst_sav_tgt = list()
+                for (sub_n, sub_f), fd in zip(
+                        f_iter, all_data):
+                    has_vocab = (sub_n == 'src' and src_vocab) or \
+                                (sub_n == 'tgt' and tgt_vocab)
+                    if sub_f.sequential and not has_vocab:
+                        # Ignore equal
+                        if getattr(ex, 'src') == getattr(ex, 'tgt'):
+                            break 
+                        # fd became a list(), not a tuple
+                        # Verify lower and only_words with letters
+                        lst_val = list(fd)
+                        lst_new = list()
+                        if sub_n in ('tgt','src'):
+                            if sub_n == 'tgt': lst_sav_tgt = [False] * len(lst_val)
+                            if sub_n == 'src': lst_sav_src = [False] * len(lst_val)
+                            j = -1
                             for valor in lst_val:
-                                w = pesqW.match(valor)
-                                s = pesqS.match(valor)
-                                if only_words > 0 and w:
-                                    x = w.group()
-                                    if lower: x = x.lower()
-                                    lst_new.append(x)
-                                elif only_words == 2 and s:
-                                    x = s.group()
-                                    lst_new.append(x)
-                                else:
-                                    if only_words == 0:
+                                j += 1
+                                if lower: valor = valor.lower()
+                                prt = pesqPrt.match(valor)
+                                if prt:       
+                                    # It supposed to return 4 groups and the second one can be None
+                                    if len(prt.groups()) > 2:
+                                        if prt.group(2) is None:
+                                            # The third group is the content. It will not be included if the second is None
+                                            valor = prt.group(1) + prt.group(3) + prt.group(4)
+                                        else:
+                                            # The third group will not be included if full colon is used
+                                            valor = prt.group(1) + prt.group(2)[:-1] + prt.group(4)
                                         lst_new.append(valor)
-                                    else: pass # Nothing to update
-                            if len(lst_new) > 0: val = tuple(lst_new)
-                    counters[k].update(val)
+                                        if sub_n == 'tgt': lst_sav_tgt[j] = True
+                                        if sub_n == 'src': lst_sav_src[j] = True
+                                    continue
+                                if only_words > 0:
+                                    if pesqWrd.match(valor): 
+                                        lst_new.append(valor)
+                                        if sub_n == 'tgt': lst_sav_tgt[j] = True
+                                        if sub_n == 'src': lst_sav_src[j] = True
+                                    elif only_words == 2 and pesqSep.match(valor):
+                                        lst_new.append(valor)
+                                        if sub_n == 'tgt': lst_sav_tgt[j] = True
+                                        if sub_n == 'src': lst_sav_src[j] = True
+                                    else: continue
+                                else:
+                                    lst_new.append(valor)
+                                    if sub_n == 'tgt': lst_sav_tgt[j] = True
+                                    if sub_n == 'src': lst_sav_src[j] = True
+                                    continue
+                        elif sub_n.startswith('src_feat'):
+                            if len(lst_val) == len(lst_sav_src):
+                                lst_new = [lst_val[x] for x in range(len(lst_sav_src)) if lst_sav_src[x]]
+                        elif sub_n.startswith('tgt_feat'):
+                            if len(lst_val) == len(lst_sav_tgt):
+                                lst_new = [lst_val[x] for x in range(len(lst_sav_tgt)) if lst_sav_tgt[x]]
+                        else:
+                            continue
+                        # update counters
+                        if len(lst_new) > 0:
+                            fd = lst_new
+                            counters[sub_n].update(fd)
+                        else:
+                            break
 
         # Drop the none-using from memory but keep the last
         if i < len(train_dataset_files) - 1:
@@ -369,51 +467,67 @@ def build_vocab(train_dataset_files, fields, data_type, share_vocab,
             del dataset
             gc.collect()
 
+    # Use the true vacabulary size
     if tgt_vocab_size == 0:
         tgt_vocab_size = len(counters["tgt"])
     if src_vocab_size == 0:
         src_vocab_size = len(counters["src"])
 
-    _build_field_vocab(
-        fields["tgt"], counters["tgt"],
+    # Save the words into text file if using only_words option
+    if only_words > 0 :
+        if tgt_vocab_size > 0:
+            try:
+                with open(save_vocab_path + '.tgt-vocab.txt', 'w', encoding='utf-8') as f1:
+                    for letra, valor in counters["tgt"].most_common():
+                        str_contador = "{0} : {1}\n".format(letra, valor)
+                        f1.write(str_contador)
+                    f1.close
+            except:
+                print("Error saving file") 
+                
+        if src_vocab_size > 0:
+            try:
+                with open(save_vocab_path + '.src-vocab.txt', 'w', encoding='utf-8') as f2:
+                    for letra, valor in counters['src'].most_common():
+                        str_contador = "{0} : {1}\n".format(letra, valor)
+                        f2.write(str_contador)
+                    f2.close
+            except:
+                print("Error saving file")
+
+    build_fv_args = defaultdict(dict)
+    build_fv_args["src"] = dict(
+        max_size=src_vocab_size, min_freq=src_words_min_frequency)
+    build_fv_args["tgt"] = dict(
         max_size=tgt_vocab_size, min_freq=tgt_words_min_frequency)
-    logger.info(" * tgt vocab size: %d." % len(fields["tgt"].vocab))
-
-    # All datasets have same num of n_tgt_features,
-    # getting the last one is OK.
-    n_tgt_feats = sum('tgt_feat_' in k for k in fields)
-    for j in range(n_tgt_feats):
-        key = "tgt_feat_" + str(j)
-        _build_field_vocab(fields[key], counters[key])
-        logger.info(" * %s vocab size: %d." % (key, len(fields[key].vocab)))
-
+    tgt_multifield = fields["tgt"]
+    _build_fv_from_multifield(
+        tgt_multifield,
+        counters,
+        build_fv_args,
+        size_multiple=vocab_size_multiple if not share_vocab else 1)
     if data_type == 'text':
-        _build_field_vocab(
-            fields["src"], counters["src"],
-            max_size=src_vocab_size, min_freq=src_words_min_frequency)
-        logger.info(" * src vocab size: %d." % len(fields["src"].vocab))
-
-        # All datasets have same num of n_src_features,
-        # getting the last one is OK.
-        n_src_feats = sum('src_feat_' in k for k in fields)
-        for j in range(n_src_feats):
-            key = "src_feat_" + str(j)
-            _build_field_vocab(fields[key], counters[key])
-            logger.info(" * %s vocab size: %d." %
-                        (key, len(fields[key].vocab)))
-
+        src_multifield = fields["src"]
+        _build_fv_from_multifield(
+            src_multifield,
+            counters,
+            build_fv_args,
+            size_multiple=vocab_size_multiple if not share_vocab else 1)
         if share_vocab:
             # `tgt_vocab_size` is ignored when sharing vocabularies
             logger.info(" * merging src and tgt vocab...")
+            src_field = src_multifield.base_field
+            tgt_field = tgt_multifield.base_field
             _merge_field_vocabs(
-                fields["src"], fields["tgt"], vocab_size=src_vocab_size,
-                min_freq=src_words_min_frequency)
-            logger.info(" * merged vocab size: %d." % len(fields["src"].vocab))
+                src_field, tgt_field, vocab_size=src_vocab_size,
+                min_freq=src_words_min_frequency,
+                vocab_size_multiple=vocab_size_multiple)
+            logger.info(" * merged vocab size: %d." % len(src_field.vocab))
+    return fields  # is the return necessary?
 
-    return fields
 
-
-def _merge_field_vocabs(src_field, tgt_field, vocab_size, min_freq):
+def _merge_field_vocabs(src_field, tgt_field, vocab_size, min_freq,
+                        vocab_size_multiple):
     # in the long run, shouldn't it be possible to do this by calling
     # build_vocab with both the src and tgt data?
     specials = [tgt_field.unk_token, tgt_field.pad_token,
@@ -425,18 +539,24 @@ def _merge_field_vocabs(src_field, tgt_field, vocab_size, min_freq):
         merged, specials=specials,
         max_size=vocab_size, min_freq=min_freq
     )
+    if vocab_size_multiple > 1:
+        _pad_vocab_to_multiple(merged_vocab, vocab_size_multiple)
     src_field.vocab = merged_vocab
     tgt_field.vocab = merged_vocab
     assert len(src_field.vocab) == len(tgt_field.vocab)
 
 
-def load_vocabulary(vocab_path, tag):
+def _read_vocab_file(vocab_path, tag):
+    """Loads a vocabulary from the given path.
+
+    Args:
+        vocab_path (str): Path to utf-8 text file containing vocabulary.
+            Each token should be on a line by itself. Tokens must not
+            contain whitespace (else only before the whitespace
+            is considered).
+        tag (str): Used for logging which vocab is being read.
     """
-    Loads a vocabulary from the given path.
-    :param vocabulary_path: path to load vocabulary from
-    :param tag: tag for vocabulary (only used for logging)
-    :return: vocabulary or None if path is null
-    """
+
     logger.info("Loading {} vocabulary from {}".format(tag, vocab_path))
 
     if not os.path.exists(vocab_path):
@@ -447,186 +567,190 @@ def load_vocabulary(vocab_path, tag):
             return [line.strip().split()[0] for line in f if line.strip()]
 
 
+def batch_iter(data, batch_size, batch_size_fn=None, batch_size_multiple=1):
+    """Yield elements from data in chunks of batch_size, where each chunk size
+    is a multiple of batch_size_multiple.
+
+    This is an extended version of torchtext.data.batch.
+    """
+    if batch_size_fn is None:
+        def batch_size_fn(new, count, sofar):
+            return count
+    minibatch, size_so_far = [], 0
+    for ex in data:
+        minibatch.append(ex)
+        size_so_far = batch_size_fn(ex, len(minibatch), size_so_far)
+        if size_so_far >= batch_size:
+            overflowed = 0
+            if size_so_far > batch_size:
+                overflowed += 1
+            if batch_size_multiple > 1:
+                overflowed += (
+                    (len(minibatch) - overflowed) % batch_size_multiple)
+            if overflowed == 0:
+                yield minibatch
+                minibatch, size_so_far = [], 0
+            else:
+                yield minibatch[:-overflowed]
+                minibatch = minibatch[-overflowed:]
+                size_so_far = 0
+                for i, ex in enumerate(minibatch):
+                    size_so_far = batch_size_fn(ex, i + 1, size_so_far)
+    if minibatch:
+        yield minibatch
+
+
 class OrderedIterator(torchtext.data.Iterator):
 
+    def __init__(self,
+                 dataset,
+                 batch_size,
+                 batch_size_multiple=1,
+                 **kwargs):
+        super(OrderedIterator, self).__init__(dataset, batch_size, **kwargs)
+        self.batch_size_multiple = batch_size_multiple
+
     def create_batches(self):
-        """ Create batches """
         if self.train:
             def _pool(data, random_shuffler):
                 for p in torchtext.data.batch(data, self.batch_size * 100):
-                    p_batch = torchtext.data.batch(
+                    p_batch = batch_iter(
                         sorted(p, key=self.sort_key),
-                        self.batch_size, self.batch_size_fn)
+                        self.batch_size,
+                        batch_size_fn=self.batch_size_fn,
+                        batch_size_multiple=self.batch_size_multiple)
                     for b in random_shuffler(list(p_batch)):
                         yield b
 
             self.batches = _pool(self.data(), self.random_shuffler)
         else:
             self.batches = []
-            for b in torchtext.data.batch(self.data(), self.batch_size,
-                                          self.batch_size_fn):
+            for b in batch_iter(
+                    self.data(),
+                    self.batch_size,
+                    batch_size_fn=self.batch_size_fn,
+                    batch_size_multiple=self.batch_size_multiple):
                 self.batches.append(sorted(b, key=self.sort_key))
 
 
 class DatasetLazyIter(object):
-    """ An Ordered Dataset Iterator, supporting multiple datasets,
-        and lazy loading.
+    """Yield data from sharded dataset files.
+
     Args:
-        datasets (list): a list of datasets, which are lazily loaded.
-        fields (dict): fields dict for the datasets.
+        dataset_paths: a list containing the locations of dataset files.
+        fields (dict[str, Field]): fields dict for the
+            datasets.
         batch_size (int): batch size.
         batch_size_fn: custom batch process function.
-        device: the GPU device.
+        device: See :class:`OrderedIterator` ``device``.
         is_train (bool): train or valid?
     """
 
-    def __init__(self, datasets, fields, batch_size, batch_size_fn,
-                 device, is_train):
-        self.datasets = datasets
+    def __init__(self, dataset_paths, fields, batch_size, batch_size_fn,
+                 batch_size_multiple, device, is_train, repeat=True,
+                 num_batches_multiple=1):
+        self._paths = dataset_paths
         self.fields = fields
         self.batch_size = batch_size
         self.batch_size_fn = batch_size_fn
+        self.batch_size_multiple = batch_size_multiple
         self.device = device
         self.is_train = is_train
+        self.repeat = repeat
+        self.num_batches_multiple = num_batches_multiple
 
-        self.cur_iter = self._next_dataset_iterator(datasets)
-        # We have at least one dataset.
-        assert self.cur_iter is not None
+    def _iter_dataset(self, path):
+        cur_dataset = torch.load(path)
+        logger.info('Loading dataset from %s, number of examples: %d' %
+                    (path, len(cur_dataset)))
+        cur_dataset.fields = self.fields
+        cur_iter = OrderedIterator(
+            dataset=cur_dataset,
+            batch_size=self.batch_size,
+            batch_size_multiple=self.batch_size_multiple,
+            batch_size_fn=self.batch_size_fn,
+            device=self.device,
+            train=self.is_train,
+            sort=False,
+            sort_within_batch=True,
+            repeat=False
+        )
+        for batch in cur_iter:
+            yield batch
+
+        cur_dataset.examples = None
+        gc.collect()
+        del cur_dataset
+        gc.collect()
 
     def __iter__(self):
-        dataset_iter = (d for d in self.datasets)
-        while self.cur_iter is not None:
-            for batch in self.cur_iter:
+        num_batches = 0
+        paths = self._paths
+        if self.is_train and self.repeat:
+            # Cycle through the shards indefinitely.
+            paths = cycle(paths)
+        for path in paths:
+            for batch in self._iter_dataset(path):
                 yield batch
-            self.cur_iter = self._next_dataset_iterator(dataset_iter)
-
-    def __len__(self):
-        # We return the len of cur_dataset, otherwise we need to load
-        # all datasets to determine the real len, which loses the benefit
-        # of lazy loading.
-        assert self.cur_iter is not None
-        return len(self.cur_iter)
-
-    def _next_dataset_iterator(self, dataset_iter):
-        try:
-            # Drop the current dataset for decreasing memory
-            if hasattr(self, "cur_dataset"):
-                self.cur_dataset.examples = None
-                gc.collect()
-                del self.cur_dataset
-                gc.collect()
-
-            self.cur_dataset = next(dataset_iter)
-        except StopIteration:
-            return None
-
-        # We clear `fields` when saving, restore when loading.
-        self.cur_dataset.fields = self.fields
-
-        # Sort batch by decreasing lengths of sentence required by pytorch.
-        # sort=False means "Use dataset's sortkey instead of iterator's".
-        return OrderedIterator(
-            dataset=self.cur_dataset, batch_size=self.batch_size,
-            batch_size_fn=self.batch_size_fn,
-            device=self.device, train=self.is_train,
-            sort=False, sort_within_batch=True,
-            repeat=False)
+                num_batches += 1
+        if self.is_train and not self.repeat and \
+           num_batches % self.num_batches_multiple != 0:
+            # When the dataset is not repeated, we might need to ensure that
+            # the number of returned batches is the multiple of a given value.
+            # This is important for multi GPU training to ensure that all
+            # workers have the same number of batches to process.
+            for path in paths:
+                for batch in self._iter_dataset(path):
+                    yield batch
+                    num_batches += 1
+                    if num_batches % self.num_batches_multiple == 0:
+                        return
 
 
-def build_dataset_iter(datasets, fields, opt, is_train=True):
+def max_tok_len(new, count, sofar):
+    """
+    In token batching scheme, the number of sequences is limited
+    such that the total number of src/tgt tokens (including padding)
+    in a batch <= batch_size
+    """
+    # Maintains the longest src and tgt length in the current batch
+    global max_src_in_batch, max_tgt_in_batch  # this is a hack
+    # Reset current longest length at a new batch (count=1)
+    if count == 1:
+        max_src_in_batch = 0
+        max_tgt_in_batch = 0
+    # Src: [<bos> w1 ... wN <eos>]
+    max_src_in_batch = max(max_src_in_batch, len(new.src[0]) + 2)
+    # Tgt: [w1 ... wM <eos>]
+    max_tgt_in_batch = max(max_tgt_in_batch, len(new.tgt[0]) + 1)
+    src_elements = count * max_src_in_batch
+    tgt_elements = count * max_tgt_in_batch
+    return max(src_elements, tgt_elements)
+
+
+def build_dataset_iter(corpus_type, fields, opt, is_train=True):
     """
     This returns user-defined train/validate data iterator for the trainer
     to iterate over. We implement simple ordered iterator strategy here,
     but more sophisticated strategy like curriculum learning is ok too.
     """
+    dataset_paths = list(sorted(
+        glob.glob(opt.data + '.' + corpus_type + '*.pt')))
+    if not dataset_paths:
+        return None
     batch_size = opt.batch_size if is_train else opt.valid_batch_size
-    if is_train and opt.batch_type == "tokens":
-        def batch_size_fn(new, count, sofar):
-            """
-            In token batching scheme, the number of sequences is limited
-            such that the total number of src/tgt tokens (including padding)
-            in a batch <= batch_size
-            """
-            # Maintains the longest src and tgt length in the current batch
-            global max_src_in_batch, max_tgt_in_batch
-            # Reset current longest length at a new batch (count=1)
-            if count == 1:
-                max_src_in_batch = 0
-                max_tgt_in_batch = 0
-            # Src: <bos> w1 ... wN <eos>
-            max_src_in_batch = max(max_src_in_batch, len(new.src) + 2)
-            # Tgt: w1 ... wN <eos>
-            max_tgt_in_batch = max(max_tgt_in_batch, len(new.tgt) + 1)
-            src_elements = count * max_src_in_batch
-            tgt_elements = count * max_tgt_in_batch
-            return max(src_elements, tgt_elements)
-    else:
-        batch_size_fn = None
+    batch_fn = max_tok_len if is_train and opt.batch_type == "tokens" else None
+    batch_size_multiple = 8 if opt.model_dtype == "fp16" else 1
 
     device = "cuda" if opt.gpu_ranks else "cpu"
 
-    return DatasetLazyIter(datasets, fields, batch_size, batch_size_fn,
-                           device, is_train)
-
-
-def lazily_load_dataset(corpus_type, opt):
-    """
-    Dataset generator. Don't do extra stuff here, like printing,
-    because they will be postponed to the first loading time.
-    Args:
-        corpus_type: 'train' or 'valid'
-    Returns:
-        A list of dataset, the dataset(s) are lazily loaded.
-    """
-    assert corpus_type in ["train", "valid"]
-
-    def _lazy_dataset_loader(pt_file, corpus_type):
-        dataset = torch.load(pt_file)
-        logger.info('Loading %s dataset from %s, number of examples: %d' %
-                    (corpus_type, pt_file, len(dataset)))
-        return dataset
-
-    # Sort the glob output by file name (by increasing indexes).
-    pts = sorted(glob.glob(opt.data + '.' + corpus_type + '.[0-9]*.pt'))
-    if pts:
-        for pt in pts:
-            yield _lazy_dataset_loader(pt, corpus_type)
-    else:
-        # Only one inputters.*Dataset, simple!
-        pt = opt.data + '.' + corpus_type + '.pt'
-        yield _lazy_dataset_loader(pt, corpus_type)
-
-
-def load_fields(dataset, opt, checkpoint):
-    if isinstance(dataset, TextDataset):
-        data_type = 'text'
-    elif isinstance(dataset, AudioDataset):
-        data_type = 'audio'
-    else:
-        data_type = 'img'
-    if checkpoint is not None:
-        logger.info('Loading vocab from checkpoint at %s.' % opt.train_from)
-        vocab = checkpoint['vocab']
-    else:
-        vocab = torch.load(opt.data + '.vocab.pt')
-
-    fields = load_fields_from_vocab(vocab, data_type)
-
-    ex_fields = dataset.examples[0].__dict__
-    fields = {k: f for k, f in fields.items() if k in ex_fields}
-
-    if data_type == 'text':
-        logger.info(' * vocabulary size. source = %d; target = %d' %
-                    (len(fields['src'].vocab), len(fields['tgt'].vocab)))
-    else:
-        logger.info(' * vocabulary size. target = %d' %
-                    (len(fields['tgt'].vocab)))
-
-    return fields
-
-
-def _collect_report_features(fields):
-    src_features = collect_features(fields, side='src')
-    tgt_features = collect_features(fields, side='tgt')
-
-    return src_features, tgt_features
+    return DatasetLazyIter(
+        dataset_paths,
+        fields,
+        batch_size,
+        batch_fn,
+        batch_size_multiple,
+        device,
+        is_train,
+        repeat=not opt.single_pass,
+        num_batches_multiple=max(opt.accum_count) * opt.world_size)

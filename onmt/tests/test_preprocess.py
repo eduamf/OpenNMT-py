@@ -47,11 +47,15 @@ class TestData(unittest.TestCase):
             with codecs.open(opt.tgt_vocab, 'w', 'utf-8') as f:
                 f.write('a\nb\nc\nd\ne\nf\n')
 
-        train_data_files = preprocess.build_save_dataset('train', fields, opt)
+        src_reader = onmt.inputters.str2reader[opt.data_type].from_opt(opt)
+        tgt_reader = onmt.inputters.str2reader["text"].from_opt(opt)
+        train_data_files = preprocess.build_save_dataset(
+            'train', fields, src_reader, tgt_reader, opt)
 
         preprocess.build_save_vocab(train_data_files, fields, opt)
 
-        preprocess.build_save_dataset('valid', fields, opt)
+        preprocess.build_save_dataset(
+            'valid', fields, src_reader, tgt_reader, opt)
 
         # Remove the generated *pt files.
         for pt in glob.glob(SAVE_DATA_PREFIX + '*.pt'):
@@ -108,7 +112,7 @@ test_databuild = [[],
                   [('dynamic_dict', True),
                    ('share_vocab', True)],
                   [('dynamic_dict', True),
-                   ('max_shard_size', 500000)],
+                   ('shard_size', 500000)],
                   [('src_vocab', '/tmp/src_vocab.txt'),
                    ('tgt_vocab', '/tmp/tgt_vocab.txt')],
                   ]

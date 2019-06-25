@@ -34,7 +34,7 @@ All dependencies can be installed via:
 pip install -r requirements.txt
 ```
 
-Note that we currently only support PyTorch 0.4.1
+Note that we currently only support PyTorch 1.0.0
 
 ## Features
 
@@ -50,11 +50,9 @@ Note that we currently only support PyTorch 0.4.1
 - ["Attention is all you need"](http://opennmt.net/OpenNMT-py/FAQ.html#how-do-i-use-the-transformer-model)
 - [Multi-GPU](http://opennmt.net/OpenNMT-py/FAQ.html##do-you-support-multi-gpu)
 - Inference time loss functions.
-
-Beta Features (committed):
-- Structured attention
 - [Conv2Conv convolution model]
 - SRU "RNNs faster than CNN" paper
+- FP16 training (mixed-precision with Apex)
 
 ## Quickstart
 
@@ -122,7 +120,7 @@ Click this button to open a Workspace on [FloydHub](https://www.floydhub.com/?ut
 
 ## Pretrained embeddings (e.g. GloVe)
 
-Go to tutorial: [How to use GloVe pre-trained embeddings in OpenNMT-py](http://forum.opennmt.net/t/how-to-use-glove-pre-trained-embeddings-in-opennmt-py/1011)
+Please see the FAQ: [How to use GloVe pre-trained embeddings in OpenNMT-py](http://opennmt.net/OpenNMT-py/FAQ.html#how-do-i-use-pretrained-embeddings-e-g-glove)
 
 ## Pretrained Models
 
@@ -145,6 +143,7 @@ Major contributors are:
 [Paul Tardy](https://github.com/pltrdy) (Ubiqus / Lium)
 [François Hernandez](https://github.com/francoishernandez) (Ubiqus)
 [Jianyu Zhan](http://github.com/jianyuzhan) (Shanghai)
+[Dylan Flaute](http://github.com/flauted (University of Dayton)
 and more !
 
 OpentNMT-py belongs to the OpenNMT project along with OpenNMT-Lua and OpenNMT-tf.

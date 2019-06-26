@@ -54,6 +54,7 @@ Note that we currently only support PyTorch 1.0.0
 - SRU "RNNs faster than CNN" paper
 - FP16 training (mixed-precision with Apex)
 - Protection of terms.
+- Web service with for large texts.
 
 ## Quickstart
 

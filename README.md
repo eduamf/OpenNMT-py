@@ -53,6 +53,7 @@ Note that we currently only support PyTorch 1.0.0
 - [Conv2Conv convolution model]
 - SRU "RNNs faster than CNN" paper
 - FP16 training (mixed-precision with Apex)
+- Protection of terms.
 
 ## Quickstart
 

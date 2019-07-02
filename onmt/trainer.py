@@ -429,11 +429,11 @@ class Trainer(object):
         """
         Simple function to report training stats (if report_manager is set)
         see `onmt.utils.ReportManagerBase.report_training` for doc
+        included total of gpu
         """
         if self.report_manager is not None:
             return self.report_manager.report_training(
-                step, num_steps, learning_rate, report_stats,
-                multigpu=self.n_gpu > 1)
+                step, num_steps, learning_rate, report_stats, self.n_gpu)
 
     def _report_step(self, learning_rate, step, train_stats=None,
                      valid_stats=None):

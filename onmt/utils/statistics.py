@@ -6,7 +6,6 @@ import sys
 
 from onmt.utils.logging import logger
 
-
 class Statistics(object):
     """
     Accumulator for loss statistics.
@@ -126,7 +125,7 @@ class Statistics(object):
                time.time() - start))
         sys.stdout.flush()
 
-    def log_tensorboard(self, prefix, writer, learning_rate, step):
+    def log_tensorboard(self, prefix, writer, learning_rate, step, memory_used=0.0):
         """ display statistics to tensorboard """
         t = self.elapsed_time()
         writer.add_scalar(prefix + "/xent", self.xent(), step)
@@ -134,3 +133,5 @@ class Statistics(object):
         writer.add_scalar(prefix + "/accuracy", self.accuracy(), step)
         writer.add_scalar(prefix + "/tgtper", self.n_words / t, step)
         writer.add_scalar(prefix + "/lr", learning_rate, step)
+        if memory_used > 0:
+            writer.add_scalar(prefix + "/mem", memory_used, step)

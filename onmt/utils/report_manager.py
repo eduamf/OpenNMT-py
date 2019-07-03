@@ -6,7 +6,7 @@ from datetime import datetime
 import onmt
 
 from onmt.utils.logging import logger
-
+import onmt.utils.eduamf_memory as mem
 
 def build_report_manager(opt):
     if opt.tensorboard:
@@ -43,6 +43,7 @@ class ReportMgrBase(object):
         """
         self.report_every = report_every
         self.progress_step = 0
+        self.n_gpu = 0
         self.start_time = start_time
 
     def start(self):
@@ -52,7 +53,7 @@ class ReportMgrBase(object):
         logger.info(*args, **kwargs)
 
     def report_training(self, step, num_steps, learning_rate,
-                        report_stats, multigpu=False):
+                        report_stats, n_gpu):
         """
         This is the user-defined batch-level traing progress
         report function.
@@ -65,6 +66,8 @@ class ReportMgrBase(object):
         Returns:
             report_stats(Statistics): updated Statistics instance.
         """
+        self.n_gpu = n_gpu
+        multigpu = n_gpu > 1
         if self.start_time < 0:
             raise ValueError("""ReportMgr needs to be started
                                 (set 'start_time' or use 'start()'""")
@@ -116,8 +119,9 @@ class ReportMgr(ReportMgrBase):
 
     def maybe_log_tensorboard(self, stats, prefix, learning_rate, step):
         if self.tensorboard_writer is not None:
+            memory_used = mem.memory_used(self.n_gpu > 0)
             stats.log_tensorboard(
-                prefix, self.tensorboard_writer, learning_rate, step)
+                prefix, self.tensorboard_writer, learning_rate, step, memory_used)
 
     def _report_training(self, step, num_steps, learning_rate,
                          report_stats):
